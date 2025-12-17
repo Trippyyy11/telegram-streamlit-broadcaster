@@ -2,8 +2,8 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 import os
 
-API_ID = int(input("Enter your Telegram API ID: "))
-API_HASH = input("Enter your Telegram API HASH: ")
+API_ID = 35246931
+API_HASH = "c14ab433b85e2250ec4ce4691a881443"
 
 SESSION_FILE = "session.txt"
 

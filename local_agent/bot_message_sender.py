@@ -5,10 +5,18 @@ BOT_TOKEN = "8256718800:AAGGLyn_aSxg3aVruamFOL6mb0ZrVo3mhbU"
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 def send_text(chat_id, text):
-    requests.post(
+    r = requests.post(
         f"{BASE_URL}/sendMessage",
         json={"chat_id": chat_id, "text": text}
     )
+    return r.json()
+
+def delete_message(chat_id, message_id):
+    r = requests.post(
+        f"{BASE_URL}/deleteMessage",
+        json={"chat_id": chat_id, "message_id": message_id}
+    )
+    return r.json()
 
 def send_photo(chat_id, file_path, caption=None):
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
