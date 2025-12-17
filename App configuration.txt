@@ -1,0 +1,586 @@
+App configuration
+App api_id:
+35246931
+App api_hash:
+c14ab433b85e2250ec4ce4691a881443
++919067549860
+
+
+
+command prompts
+cd D:\Miscs\TP\telegram-streamlit-broadcaster
+.\venv\Scripts\activate
+cd local_agent
+python agent_daemon.py
+
+
+cd D:\Miscs\TP\telegram-streamlit-broadcaster
+.\venv\Scripts\activate
+streamlit run streamlit_app/app.py
+
+
+BOT token
+8256718800:AAGGLyn_aSxg3aVruamFOL6mb0ZrVo3mhbU
+
+
+
+app.py
+import streamlit as st
+import sqlite3
+import os
+import json
+import uuid
+from datetime import datetime
+
+# ===================== PAGE CONFIG =====================
+st.set_page_config(
+    page_title="Telegram Broadcaster",
+    page_icon="📢",
+    layout="wide"
+)
+
+# ===================== PATHS =====================
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOCAL_AGENT_DIR = os.path.join(BASE_DIR, "local_agent")
+
+DB_PATH = os.path.join(LOCAL_AGENT_DIR, "storage.db")
+ENTITIES_PATH = os.path.join(LOCAL_AGENT_DIR, "telegram_entities.json")
+TASKS_DIR = os.path.join(LOCAL_AGENT_DIR, "tasks")
+UPLOADS_DIR = os.path.join(LOCAL_AGENT_DIR, "uploads")
+
+os.makedirs(TASKS_DIR, exist_ok=True)
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+# ===================== DATABASE =====================
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cur = conn.cursor()
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS folders (
+    name TEXT PRIMARY KEY
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS folder_entities (
+    folder TEXT,
+    entity_id INTEGER,
+    label TEXT
+)
+""")
+conn.commit()
+
+# ===================== LOAD TELEGRAM ENTITIES =====================
+with open(ENTITIES_PATH, "r", encoding="utf-8") as f:
+    entities = json.load(f)
+
+ENTITY_LABELS = {
+    f"{e['name']} ({e['type']})": e["id"]
+    for e in entities
+}
+
+# ===================== SIDEBAR =====================
+st.sidebar.title("📂 Telegram Broadcaster")
+page = st.sidebar.radio(
+    "Navigation",
+    ["Folder Manager", "Send Message", "Send / Schedule Quiz"]
+)
+
+# =========================================================
+# 📁 FOLDER MANAGER
+# =========================================================
+if page == "Folder Manager":
+    st.header("📁 Folder Manager")
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        new_folder = st.text_input("New folder name")
+    with col2:
+        if st.button("➕ Create Folder"):
+            if new_folder.strip():
+                cur.execute(
+                    "INSERT OR IGNORE INTO folders VALUES (?)",
+                    (new_folder.strip(),)
+                )
+                conn.commit()
+                st.success("Folder created")
+
+    st.divider()
+
+    cur.execute("SELECT name FROM folders ORDER BY name")
+    folders = [f[0] for f in cur.fetchall()]
+
+    for fname in folders:
+        with st.expander(f"📂 {fname}", expanded=False):
+            cur.execute(
+                "SELECT label FROM folder_entities WHERE folder=?",
+                (fname,)
+            )
+            existing = [r[0] for r in cur.fetchall()]
+
+            selected = st.multiselect(
+                "Select groups / contacts",
+                ENTITY_LABELS.keys(),
+                default=existing,
+                key=f"select_{fname}"
+            )
+
+            c1, c2 = st.columns(2)
+
+            if c1.button("💾 Save", key=f"save_{fname}"):
+                cur.execute("DELETE FROM folder_entities WHERE folder=?", (fname,))
+                for label in selected:
+                    cur.execute(
+                        "INSERT INTO folder_entities VALUES (?,?,?)",
+                        (fname, ENTITY_LABELS[label], label)
+                    )
+                conn.commit()
+                st.success("Folder updated")
+
+            if c2.button("🗑 Delete Folder", key=f"delete_{fname}"):
+                cur.execute("DELETE FROM folder_entities WHERE folder=?", (fname,))
+                cur.execute("DELETE FROM folders WHERE name=?", (fname,))
+                conn.commit()
+                st.warning("Folder deleted")
+                st.rerun()
+
+# =========================================================
+# ✉️ SEND MESSAGE (TEXT / IMAGE / FILE)
+# =========================================================
+elif page == "Send Message":
+    st.header("✉️ Send Message")
+
+    cur.execute("SELECT name FROM folders ORDER BY name")
+    folders = [f[0] for f in cur.fetchall()]
+
+    selected_folders = st.multiselect("Select folders", folders)
+    message_text = st.text_area("Message text (optional)", height=120)
+
+    uploaded_file = st.file_uploader(
+        "Attach image or file (optional)",
+        type=["jpg", "jpeg", "png", "pdf", "zip", "mp4"]
+    )
+
+    schedule = st.checkbox("📅 Schedule message")
+    send_time = st.datetime_input(
+        "Send at",
+        datetime.now()
+    ) if schedule else None
+
+    if st.button("🚀 Send Message"):
+        recipient_ids = []
+        for f in selected_folders:
+            cur.execute(
+                "SELECT entity_id FROM folder_entities WHERE folder=?",
+                (f,)
+            )
+            recipient_ids.extend([r[0] for r in cur.fetchall()])
+
+        file_path = None
+        file_type = None
+
+        if uploaded_file:
+            ext = uploaded_file.name.split(".")[-1].lower()
+            unique_name = f"{uuid.uuid4()}.{ext}"
+            file_path = os.path.join(UPLOADS_DIR, unique_name)
+
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            file_type = "photo" if ext in ["jpg", "jpeg", "png"] else "document"
+
+        task = {
+            "type": "message",
+            "recipients": list(set(recipient_ids)),
+            "content": message_text,
+            "file_path": file_path,
+            "file_type": file_type,
+            "send_at": send_time.isoformat() if send_time else None
+        }
+
+        with open(
+            os.path.join(TASKS_DIR, f"{uuid.uuid4()}.json"),
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(task, f, indent=2)
+
+        st.success("Message queued successfully")
+
+# =========================================================
+# 📊 SEND / SCHEDULE QUIZ
+# =========================================================
+elif page == "Send / Schedule Quiz":
+    st.header("📊 Quiz / Poll")
+
+    cur.execute("SELECT name FROM folders ORDER BY name")
+    folders = [f[0] for f in cur.fetchall()]
+
+    selected_folders = st.multiselect("Select folders", folders)
+
+    question = st.text_input("Quiz question")
+    options = [
+        st.text_input("Option 1"),
+        st.text_input("Option 2"),
+        st.text_input("Option 3"),
+        st.text_input("Option 4")
+    ]
+    correct = st.selectbox("Correct option index", [0, 1, 2, 3])
+
+    schedule = st.checkbox("📅 Schedule quiz")
+    send_time = st.datetime_input(
+        "Send at",
+        datetime.now()
+    ) if schedule else datetime.now()
+
+    if st.button("📤 Send Quiz"):
+        recipient_ids = []
+        for f in selected_folders:
+            cur.execute(
+                "SELECT entity_id FROM folder_entities WHERE folder=?",
+                (f,)
+            )
+            recipient_ids.extend([r[0] for r in cur.fetchall()])
+
+        task = {
+            "type": "poll",
+            "recipients": list(set(recipient_ids)),
+            "content": {
+                "question": question,
+                "options": options,
+                "correct": correct
+            },
+            "send_at": send_time.isoformat()
+        }
+
+        with open(
+            os.path.join(TASKS_DIR, f"{uuid.uuid4()}.json"),
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(task, f, indent=2)
+
+        st.success("Quiz queued successfully")
+
+
+
+
+telegram_client.py
+
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+import os
+
+API_ID = int(input("Enter your Telegram API ID: "))
+API_HASH = input("Enter your Telegram API HASH: ")
+
+SESSION_FILE = "session.txt"
+
+def get_client():
+    if os.path.exists(SESSION_FILE):
+        with open(SESSION_FILE, "r") as f:
+            session_str = f.read()
+        return TelegramClient(StringSession(session_str), API_ID, API_HASH)
+    else:
+        return TelegramClient(StringSession(), API_ID, API_HASH)
+
+
+async def login_and_save(client):
+    await client.start()
+    with open(SESSION_FILE, "w") as f:
+        f.write(client.session.save())
+
+
+
+agent_daemon.py
+
+import asyncio
+import json
+import os
+from datetime import datetime
+
+from bot_message_sender import send_text, send_photo, send_document
+from bot_poll_sender import send_poll
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TASKS_DIR = os.path.join(BASE_DIR, "tasks")
+
+async def run_daemon():
+    print("Telegram agent daemon started. Scheduling active.\n")
+
+    while True:
+        for fname in os.listdir(TASKS_DIR):
+            if not fname.endswith(".json"):
+                continue
+
+            fpath = os.path.join(TASKS_DIR, fname)
+
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    task = json.load(f)
+
+                send_at = task.get("send_at")
+                if send_at and datetime.now() < datetime.fromisoformat(send_at):
+                    continue
+
+                recipients = task["recipients"]
+
+                # ---------- MESSAGE ----------
+                if task["type"] == "message":
+                    text = task.get("content", "")
+                    file_path = task.get("file_path")
+                    file_type = task.get("file_type")
+
+                    for chat_id in recipients:
+                        if file_path and file_type == "photo":
+                            send_photo(chat_id, file_path, text)
+                        elif file_path and file_type == "document":
+                            send_document(chat_id, file_path, text)
+                        else:
+                            send_text(chat_id, text)
+
+                # ---------- QUIZ ----------
+                elif task["type"] == "poll":
+                    c = task["content"]
+                    for chat_id in recipients:
+                        send_poll(
+                            chat_id,
+                            c["question"],
+                            c["options"],
+                            c["correct"]
+                        )
+
+                os.remove(fpath)
+                print(f"Processed {fname}")
+
+            except Exception as e:
+                print(f"Error processing {fname}: {e}")
+
+        await asyncio.sleep(2)
+
+if __name__ == "__main__":
+    asyncio.run(run_daemon())
+
+
+
+bot_message_sender.py
+
+import requests
+import os
+
+BOT_TOKEN = "8256718800:AAGGLyn_aSxg3aVruamFOL6mb0ZrVo3mhbU"
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+def send_text(chat_id, text):
+    url = f"{BASE_URL}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
+    r = requests.post(url, json=payload, timeout=30)
+    print(f"Sent message to {chat_id}")
+    return r.json()
+
+def send_photo(chat_id, photo_path, caption=None):
+    url = f"{BASE_URL}/sendPhoto"
+
+    if not os.path.exists(photo_path):
+        raise FileNotFoundError(photo_path)
+
+    with open(photo_path, "rb") as img:
+        files = {"photo": img}
+        data = {
+            "chat_id": chat_id,
+            "caption": caption or ""
+        }
+        r = requests.post(url, data=data, files=files, timeout=60)
+
+    print(f"Sent photo to {chat_id}")
+    return r.json()
+
+def send_document(chat_id, file_path, caption=None):
+    url = f"{BASE_URL}/sendDocument"
+
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(file_path)
+
+    with open(file_path, "rb") as doc:
+        files = {"document": doc}
+        data = {
+            "chat_id": chat_id,
+            "caption": caption or ""
+        }
+        r = requests.post(url, data=data, files=files, timeout=60)
+
+    print(f"Sent document to {chat_id}")
+    return r.json()
+
+
+
+bot_poll_sender
+
+import requests
+
+BOT_TOKEN = "8256718800:AAGGLyn_aSxg3aVruamFOL6mb0ZrVo3mhbU"
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+def send_poll(chat_id, question, options, correct):
+    payload = {
+        "chat_id": chat_id,
+        "question": question,
+        "options": options,
+        "type": "quiz",
+        "correct_option_id": correct,
+        "is_anonymous": True
+    }
+
+    requests.post(f"{BASE_URL}/sendPoll", json=payload)
+
+
+
+
+
+bot_config.py
+
+BOT_TOKEN = "8256718800:AAGGLyn_aSxg3aVruamFOL6mb0ZrVo3mhbU"
+
+
+
+
+agent.py
+
+import sys
+import json
+import asyncio
+from telegram_client import get_client, login_and_save
+
+async def send_messages(task_file):
+    with open(task_file, "r", encoding="utf-8") as f:
+        task = json.load(f)
+
+    recipients = task.get("recipients", [])
+    message = task.get("message")
+
+    if not recipients or not message:
+        print("No recipients or message found in task.json")
+        return
+
+    client = get_client()
+    await login_and_save(client)
+
+    for recipient in recipients:
+        try:
+            await client.send_message(recipient, message)
+            print(f"Sent to {recipient}")
+            await asyncio.sleep(3)  # basic rate-limit protection
+        except Exception as e:
+            print(f"Failed to send to {recipient}: {e}")
+
+    await client.disconnect()
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python agent.py task.json")
+        sys.exit(1)
+
+    asyncio.run(send_messages(sys.argv[1]))
+
+
+
+
+
+fetch_all_entities.py
+
+import asyncio
+import json
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+
+API_ID = 35246931
+API_HASH = "c14ab433b85e2250ec4ce4691a881443"
+
+OUTPUT_FILE = "telegram_entities.json"
+
+async def main():
+    client = TelegramClient(StringSession(), API_ID, API_HASH)
+    await client.start()
+
+    entities = []
+
+    print("\nFetching all Telegram groups, channels, and contacts...\n")
+
+    async for dialog in client.iter_dialogs():
+        entity = dialog.entity
+
+        entity_type = (
+            "group" if dialog.is_group else
+            "channel" if dialog.is_channel else
+            "contact"
+        )
+
+        username = getattr(entity, "username", None)
+
+        print(
+            f"NAME: {dialog.name} | "
+            f"ID: {dialog.id} | "
+            f"TYPE: {entity_type}"
+        )
+
+        entities.append({
+            "name": dialog.name,
+            "id": dialog.id,
+            "username": username,
+            "type": entity_type
+        })
+
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        json.dump(entities, f, indent=2)
+
+    print(f"\nSaved {len(entities)} entities to {OUTPUT_FILE}\n")
+
+    await client.disconnect()
+
+asyncio.run(main())
+
+
+
+schedular.py
+
+
+import json
+import subprocess
+from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime
+
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+
+def schedule_task(task_file):
+    with open(task_file, "r") as f:
+        task = json.load(f)
+
+    send_at = task.get("send_at")
+    if not send_at:
+        print("No schedule found in task.")
+        return
+
+    run_time = datetime.fromisoformat(send_at)
+
+    scheduler.add_job(
+        subprocess.call,
+        trigger="date",
+        run_date=run_time,
+        args=(["python", "agent.py", task_file],)
+    )
+
+    print(f"Task scheduled at {run_time}")
+
+
+if __name__ == "__main__":
+    schedule_task("task.json")
+    input("Scheduler running. Press Enter to exit...")
+
+
+
+
